@@ -1,0 +1,543 @@
+---
+title: "Plotting Phylotrees with treeio+ggtree"
+subtitle: ""
+author: "Ammar Aziz"
+institute: "VIDRL"
+date: "`r Sys.Date()`"
+output:
+  xaringan::moon_reader:
+    nature:
+      css: ["xaringan-themer.css"]
+      ratio: '16:9'
+      highlightStyle: monokai
+      highlightLanguage: r
+      slideNumberFormat: '%current%' 
+      highlightLines: true
+      countIncrementalSlides: false
+---
+
+<style type="text/css">
+.remark-slide-content {
+    font-size: 20px;
+    padding: 1em 1em 1em 1em;
+}
+
+._hl, .remark-code-string-highlighted, .remark-code-line-highlighted {
+    color: black;
+    font-weight: bold;
+    border-radius: 3px;
+}
+
+.remark-slide-scaler {
+    overflow-y: auto;
+}
+
+</style>
+
+
+# Setup for this tutorial
+
+Assumed you have R + [RStudio IDE](https://www.rstudio.com/products/rstudio/) installed.
+
+Install the `ggtree` package from [Bioconductor](https://bioconductor.org/packages/release/bioc/html/ggtree.html):
+
+```{r eval=FALSE, tidy=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("ggtree")
+```
+
+Also install `dplyr`, `tidyr`,  `lubridate`:
+
+```{r eval=FALSE, tidy=FALSE}
+install.packages(c("dplyr", "tidyr", "lubridate"))
+```
+
+--
+
+_Optional_ `pacman` to install, load and silence start up messages:
+```{r eval=FALSE, tidy=FALSE}
+install.packages(pacman)
+pacman::p_load("dplyr", "tidyr", "lubridate")
+# to start up messages!!!
+```
+
+---
+
+# Phylotree examples:
+
+---
+
+# Get example data:
+
+```{r, cache=TRUE}
+# metadata
+download.file("https://raw.githubusercontent.com/jameshadfield/phandangoExampleData/master/gubbinsGono/ESC_resistance_groups.csv",
+              destfile = "metadata.csv")
+# treefile
+download.file("https://raw.githubusercontent.com/jameshadfield/phandangoExampleData/master/gubbinsGono/original_set.FA1090.final_tree.figtree.tre",
+              destfile = "gono.tree")
+```
+
+Load the required libraries
+
+```{r}
+# using pacman to silence start up messages
+# use library(ggtree) to load each package
+pacman::p_load(dplyr, ggplot2, ggtree, treeio)
+```
+
+---
+class: inverse, middle, center
+
+# A fast and furious introduction to data wrangling with dplyr
+
+---
+
+# Verbs
+
+`dplyr` has a bunch of functions or `verbs` that can be combined to wrangle data. The verbs of are:
+
+- `mutate()` adds new variables that are functions of existing variables
+- `select()` picks variables based on their names.
+- `filter()` picks cases based on their values.
+- `summarise()` reduces multiple values down to a single summary.
+- `group_by()` to apply operations on groups.
+- `%>%` pipe symbol, works similar to bash `|`.
+
+There are more verbs but outside the scope of this tutorial. Run `vignette("dplyr")` in R to see the tutorial.
+
+Example `dplyr` code:
+
+```{r, eval=FALSE}
+starwars[1:3,1:10]
+#   name           height  mass hair_color skin_color  eye_color birth_year sex   gender    homeworld
+# 1 Luke Skywalker    172    77 blond      fair        blue              19 male  masculine Tatooine 
+# 2 C-3PO             167    75 NA         gold        yellow           112 none  masculine Tatooine 
+# 3 R2-D2              96    32 NA         white, blue red               33 none  masculine Naboo
+```
+
+
+---
+# Verbs
+```{r}
+starwars %>%
+    select(Name=name, height:sex, -homeworld) %>%
+    filter(!is.na(hair_color)) %>%
+    group_by(sex) %>%
+    summarise(total_mass = sum(mass, na.rm=TRUE))
+```
+
+Explained:
+- `select` selects (or drop) variable (columns). It can also rename `Name=name`,  select a range `height:sex` or drop `-homeworld`.
+- `filter` keep _rows_ that match a condition. In this case drop rows with `NA` in `hair_color` (stupid robots).
+- `group_by` groups rows by `sex` 
+- finally `summarise` to apply a function to the groups.
+
+
+---
+
+# Let's wrangle the metadata!
+
+```{r}
+metadata = read.csv("metadata.csv", na.strings = "")
+metadata[1:3,]
+```
+
+Task - create a categorical variable to encode `azithromycin.MIC.c1` into `resistant` (>=8) and `not-resistant` (<8). 
+```{r}
+metadata = metadata %>%
+    mutate(
+        azth_mic = case_when(azithromycin.MIC.c1 >= 8 ~ "resistance",
+                  azithromycin.MIC.c1 < 8 ~ "not-resistant",
+                  is.na(azithromycin.MIC.c1) ~ NA_character_,
+                  TRUE ~ "Other"))
+```
+
+---
+
+# Let's wrangle the metadata - continued!
+
+```{r}
+metadata[1:3,]
+```
+
+Success!
+
+Task - extract the patient number into it's own column
+
+```{r}
+pacman::p_load(tidyr)
+metadata = metadata %>%
+    separate(col = name, into = c("patient_id", "sample_number"), sep = "_", remove = FALSE)
+```
+
+`separate` is a `tidyr` verb. `tidyr` is a fantastic package which includes the `pivot_*` functions for transforming dataframes from long to wide and back. See `vignette("tidyr")`.
+
+---
+
+# Final dataframe for plotting
+
+```{r}
+metadata[1:5,]
+```
+
+Ready to plot our tree and the end of data wrangling section.
+
+Note: always make sure the first column (in this case `name`) contains the same values as the tiplabels in the tree.
+
+---
+
+class: inverse, middle, center
+
+# A slow and boring introduction to ggtree
+
+---
+
+# Reading in trees using `Treeio`
+
+Sister package of `ggtree` is the `Treeio` package dedicated to reading and writing phylo trees.
+
+There are 28 different functions dedicated to parsing trees. The main ones:
+
+- `read.beast` and `read.beast.newick` for beast trees
+- `read.iqtree` especially if using UFBOOT+SH-aLRT
+- `read.newick` and `read.nexus` for basic newick/nexus trees
+- `read.nhx` for extended newick format (this is very similar to beast trees)
+
+For a fantastic review of tree formats see the [ggtree book chapter 1](https://yulab-smu.top/treedata-book/chapter1.html?q=treeio)
+
+Our tree is a newick tree. Let's read it into R:
+
+```{r}
+raw_tree = read.newick("gono.tree")
+```
+
+What's returned? A named list containing the following:
+
+```{r}
+names(raw_tree)
+```
+
+---
+
+# Reading in trees using `Treeio` - Continued
+
+```{r}
+names(raw_tree)
+```
+
+1. "edge" -  matrix representation of the phylotree where each row represents edge connections
+2. "edge.length" - list of the branch lengths, same length as "edge"
+3. "Nnode" - number of nodes in the tree
+4. "tip.label" - list of the taxa labels
+
+> Note: Best practice is to **not** modify the `tip.labels` directly in the `raw_tree` object. An example of how to do this properly is presented later on. 
+
+We only have to worry about #4, the tip labels. We need to check if our tip labels are present in our metadata frame. We check early to make sure downstream we don't run into weird issues of missing colors.
+
+```{r}
+ind = raw_tree$tip.label %in% metadata$name
+# should return empty character
+# if not empty this tip.label is missing
+raw_tree$tip.label[!ind] 
+```
+
+Looks good!
+
+---
+# Reading in trees using `Treeio` - Continued
+
+```{r}
+ind = raw_tree$tip.label %in% metadata$name
+# should return empty character
+# if not empty this tip.label is missing
+raw_tree$tip.label[!ind] 
+```
+
+Looks good!
+
+# Let's plot!!!
+
+---
+### Plotting phylotrees
+
+.pull-left[
+```{r}
+tree = ggtree(raw_tree) +
+    geom_tiplab(size = 2)
+tree
+```
+]
+
+.pull-right[
+That's it folks, pack it up we're done... no wait we can make it better. Let's color to the tiplabels:
+```{r}
+tree = ggtree(raw_tree) +
+    geom_tiplab(aes(color=patient_id), size = 2)
+#Error in label_geom(mapping = list(x = ~x + diff(range(x, na.rm = TRUE))/200, :
+# ℹ Error occurred in the 3rd layer.
+# Caused by error:
+# ! object 'patient_id' not found
+```
+
+Ooops what went wrong? We didn't add the `metadata` dataframe. We can do this using the `ggtree` special pipe `%<+%` which is essentially a `left_join` with the tree object
+
+```{r}
+{{ tree = ggtree(raw_tree) %<+% metadata }} +
+    geom_tiplab(aes(color=location), size = 2)
+tree
+```
+]
+
+---
+
+Let's add tippoint colors:
+
+```{r}
+tree = ggtree(raw_tree) %<+% metadata +
+    geom_tiplab(aes(color=location), size = 2) +
+    {{ geom_tippoint(aes(fill=sexual.orientation), shape = 21) }}
+tree
+```
+
+---
+
+Looks good but those colors are ugly! We have two choices, use `viridis` color scheme or manually define colors. 
+
+```{r}
+tree = ggtree(raw_tree) %<+% metadata +
+    geom_tiplab(aes(color=location), size = 2) +
+    geom_tippoint(aes(fill=sexual.orientation), shape = 21) +
+    scale_fill_viridis_d() +
+    {{ scale_color_viridis_d(option="H") }}
+tree
+```
+
+---
+
+
+.pull-left[
+
+Yeah that's ugly.
+
+Let's add custom colors. To do this we create a named list:
+
+```{r}
+fils = c("MSM" = "#ff7f00", 
+         "MSW" = "#377eb8")
+```
+
+This is only really feasible for ~12 colors. For heatmap, reuse the same colors for non-adjacent columns. 
+
+```{r}
+tree = ggtree(raw_tree) %<+% metadata +
+    geom_tiplab(aes(color=location), size = 2) +
+    geom_tippoint(aes(fill=sexual.orientation), 
+                  shape = 21) +
+    scale_color_viridis_d(option="H") +
+    {{ scale_fill_manual(values = fils, 
+                         na.value = "grey20") }}
+```
+
+That looks better!
+]
+
+.pull-right[
+```{r}
+tree
+```
+]
+---
+
+.pull-left[
+Let's add branch lengths, this is the same way to add bootstrap values
+
+```{r}
+tree = ggtree(raw_tree) %<+% metadata +
+    geom_tiplab(aes(color=location), size = 2) +
+    geom_tippoint(aes(fill=sexual.orientation), 
+                  shape = 21) +
+    scale_color_viridis_d(option="H") +
+    scale_fill_manual(values = fils, 
+                      na.value = "grey20") +
+{{geom_text2(aes(x = branch, label = node, subset=isTip %in% FALSE), size = 2)}}
+```
+]
+
+.pull-right[
+```{r}
+tree
+```
+]
+
+---
+
+Let's add a heatmap. First we need to prep a dataframe for the heatmap:
+
+```{r}
+heatmap_data = metadata %>%
+    select(year:azithromycin.MIC.c1)
+row.names(heatmap_data) = metadata[, "name"]
+```
+
+The row names __*must*__ match the tiplabels.
+
+```{r}
+heatmap_data[1:5, 1:5]
+```
+
+---
+
+# Let's plot the heatmap
+.pull-left[
+We use the command `gheatmap()` function.
+
+```{r, warning=FALSE}
+heatmap = gheatmap(tree, heatmap_data)
+# ggplot2 warning message is presented due to the use of _fill_ attribute 
+# when plotting the tree. Safe to ignore.
+```
+]
+
+.pull-right[
+```{r}
+heatmap = heatmap + scale_fill_viridis_d()
+heatmap
+```
+]
+
+---
+
+
+`gheatmap` has a bunch of useful settings:
+```{r}
+heatmap = gheatmap(tree, heatmap_data, 
+                   offset = 0.005, 
+                   width = 0.5, 
+                   colnames_angle = 45, 
+                   colnames_offset_x = -0.01, # x values are always tiny - ggplot weirdness
+                   colnames_offset_y = -5, # y values are big - related to number of tips
+                   legend_title = "Resistance") +
+    scale_fill_viridis_d()
+heatmap
+```
+
+---
+
+# Putting it all together
+
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(ggtree)
+library(dplyr)
+
+# custom colors
+fils = c("MSM" = "#ff7f00", 
+         "MSW" = "#377eb8")
+
+# read in data
+metadata = read.csv("metadata.csv", na.strings = "")
+raw_tree = read.newick("gono.tree")
+
+# wrangle for heatmap
+heatmap_data = metadata %>%
+    select(year:azithromycin.MIC.c1)
+row.names(heatmap_data) = metadata[, "name"]
+
+# plot tree
+tree = ggtree(raw_tree) %<+% metadata +
+    geom_tiplab(aes(color=location), 
+                size = 2) +
+    geom_tippoint(aes(fill=sexual.orientation), 
+                  shape = 21) +
+    scale_color_viridis_d(option="H") +
+    scale_fill_manual(values = fils, 
+                      na.value = "grey20") +
+    geom_text2(aes(x = branch, 
+                   label = node, 
+                   subset=isTip %in% FALSE), 
+               size = 2)
+
+# plot heatmap
+heatmap = gheatmap(p = tree, 
+                   data = heatmap_data, 
+                   offset = 0.005, 
+                   width = 0.5, 
+                   colnames_angle = 45,
+                   colnames_offset_x = -0.01, 
+                   colnames_offset_y = -5,
+                   legend_title = "Resistance") +
+    scale_fill_viridis_d()
+```
+
+---
+
+# Tips and tricks
+
+Fixing legend icon when coloring text:
+```
+tree + geom_tiplabel(..., 
+                    key_glyph = draw_key_rect)
+```
+
+Plot is too big, gets truncated at the edge
+```
+tree + xlim(NA, 0.001) # right side
+tree + xlim(0.001, 0.001) # both side
+
+tree + ylim(NA, 236) # top 
+# tip - number of tips is y-axis length.
+# eg raw_tree$Nnode - 5 = 236
+```
+
+Tiny tippoints - remove the outer black circle
+```
+tree + geom_tippoint(..., stroke=NA) # stroke sets the size or remove it 
+```
+
+---
+
+BEAST plots
+
+```
+file <- system.file("extdata/BEAST", "beast_mcc.tree", package="treeio")
+ggtree(beast, aes(color=rate))  +
+    geom_range(range='length_0.95_HPD', color='red', alpha=.6, size=2) +
+    geom_nodelab(aes(x=branch, label=round(posterior, 2)), vjust=-.5, size=3)
+```
+
+scaling clades
+
+```
+scaleClade(p, 23, .2) %>% collapse(23, 'min', fill="darkgreen")  
+```
+
+Show only some tip labels.
+
+Best way is to wrangle your metadata:
+```
+# create new column in metadata
+metadata = metadata %>% 
+    mutate(name_keep = case_when(
+        location == "CHI" ~ location, 
+        TRUE ~ ""))
+# use this inside aes:
+tree + geom_tiplabel(aes(label=name_keep))
+```
+
+
+---
+
+# Thanks!
+
+Questions?
+
+Resources:
+
+- The ggtree book: https://yulab-smu.top/treedata-book/index.html
+- MicroPDI Slack - post in bioinformatics with your code and I will help best I can. 
+
+
+
